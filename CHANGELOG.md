@@ -16,6 +16,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Changed
 - **ERC-8004 required to list services** - Spam prevention via on-chain identity
+- **New favicon and apple-icon** - Updated branding with M-claw logo design
 - Removed "Try Testnet" link from production UI — testnet environment shut down
 
 ### Fixed
