@@ -85,6 +85,61 @@ console.log(`🌐 RPC: ${RPC_URL}`);
 
 console.log(`🔐 Facilitator wallet: ${account.address}`);
 
+// ERC20 ABI for USDC transfers
+const ERC20_ABI = [
+  {
+    name: "transfer",
+    type: "function",
+    inputs: [
+      { name: "to", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
+    name: "balanceOf",
+    type: "function",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+] as const;
+
+// Helper to transfer USDC to seller (after we receive payment)
+async function forwardToSeller(
+  sellerWallet: string,
+  amountMicroUsdc: bigint,
+  feeBps: number = 300 // 3% default
+): Promise<{ success: boolean; txHash?: string; error?: string }> {
+  try {
+    // Calculate fee and seller amount
+    const feeAmount = (amountMicroUsdc * BigInt(feeBps)) / BigInt(10000);
+    const sellerAmount = amountMicroUsdc - feeAmount;
+    
+    console.log(`💸 Forwarding to seller:`);
+    console.log(`   Total: ${amountMicroUsdc} (${Number(amountMicroUsdc) / 1_000_000} USDC)`);
+    console.log(`   Fee (${feeBps / 100}%): ${feeAmount} (${Number(feeAmount) / 1_000_000} USDC)`);
+    console.log(`   Seller gets: ${sellerAmount} (${Number(sellerAmount) / 1_000_000} USDC)`);
+    console.log(`   Seller wallet: ${sellerWallet}`);
+
+    // Transfer USDC to seller
+    const txHash = await walletClient.writeContract({
+      address: BASE_USDC as `0x${string}`,
+      abi: ERC20_ABI,
+      functionName: "transfer",
+      args: [sellerWallet as `0x${string}`, sellerAmount],
+    });
+
+    console.log(`✅ Forwarded to seller: ${txHash}`);
+    return { success: true, txHash };
+  } catch (error) {
+    console.error("❌ Forward to seller failed:", error);
+    return { 
+      success: false, 
+      error: error instanceof Error ? error.message : "Unknown error" 
+    };
+  }
+}
+
 // Create EVM signer for x402
 const evmSigner = toFacilitatorEvmSigner({
   address: account.address,
@@ -248,10 +303,40 @@ app.post("/settle", async (req, res) => {
       });
     }
 
+    // Settle the payment (buyer → MoltMart)
     const response: SettleResponse = await facilitator.settle(
       paymentPayload as PaymentPayload,
       paymentRequirements as PaymentRequirements
     );
+
+    // If settlement succeeded and there's a seller to forward to
+    if (response.success && paymentRequirements.extra?.seller_wallet) {
+      const sellerWallet = paymentRequirements.extra.seller_wallet as string;
+      const feeBps = (paymentRequirements.extra.fee_bps as number) || 300;
+      const amountMicroUsdc = BigInt(paymentRequirements.maxAmountRequired);
+
+      console.log(`🔄 Settlement succeeded, forwarding to seller...`);
+      
+      const forwardResult = await forwardToSeller(sellerWallet, amountMicroUsdc, feeBps);
+      
+      if (!forwardResult.success) {
+        console.error(`❌ Forward failed but settlement succeeded. Manual intervention needed.`);
+        console.error(`   Seller: ${sellerWallet}, Amount: ${amountMicroUsdc}`);
+        // Still return success since buyer payment went through
+        // TODO: Add to a retry queue for forwarding
+      }
+
+      // Add forward info to response
+      (response as any).forward = {
+        seller_wallet: sellerWallet,
+        seller_amount: Number(amountMicroUsdc - (amountMicroUsdc * BigInt(feeBps)) / BigInt(10000)) / 1_000_000,
+        fee_amount: Number((amountMicroUsdc * BigInt(feeBps)) / BigInt(10000)) / 1_000_000,
+        fee_percent: feeBps / 100,
+        forward_tx: forwardResult.txHash,
+        forward_success: forwardResult.success,
+      };
+    }
+
     res.json(response);
   } catch (error) {
     console.error("Settle error:", error);

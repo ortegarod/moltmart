@@ -2374,7 +2374,7 @@ async def call_service(service_id: str, request: Request, agent: Agent = Depends
 
     if not payment_header:
         # No payment - return 402 with requirements
-        # Build the 402 response manually
+        # Payment goes to MoltMart, we forward to seller minus fee
         return JSONResponse(
             status_code=402,
             content={
@@ -2388,12 +2388,14 @@ async def call_service(service_id: str, request: Request, agent: Agent = Depends
                         "resource": resource_url,
                         "description": f"Payment for service: {service.name}",
                         "mimeType": "application/json",
-                        "payTo": service.provider_wallet,
+                        "payTo": MOLTMART_WALLET,  # Payment to us, we forward to seller
                         "maxTimeoutSeconds": 300,
                         "asset": USDC_CONTRACT,
                         "extra": {
                             "name": "USD Coin",
                             "decimals": 6,
+                            "seller_wallet": service.provider_wallet,  # For forwarding
+                            "fee_bps": 300,  # 3% fee
                         },
                     }
                 ],
@@ -2410,14 +2412,19 @@ async def call_service(service_id: str, request: Request, agent: Agent = Depends
         payment_payload = json.loads(payment_payload_json)
 
         # Build requirements for verification
+        # Payment goes to MoltMart, facilitator forwards to seller minus fee
         payment_requirements = {
             "scheme": "exact",
             "network": NETWORK,
             "maxAmountRequired": str(int(service.price_usdc * 1_000_000)),
             "resource": resource_url,
-            "payTo": service.provider_wallet,
+            "payTo": MOLTMART_WALLET,  # Payment to us
             "maxTimeoutSeconds": 300,
             "asset": USDC_CONTRACT,
+            "extra": {
+                "seller_wallet": service.provider_wallet,
+                "fee_bps": 300,  # 3% = 300 basis points
+            },
         }
 
         # Verify and settle via facilitator
