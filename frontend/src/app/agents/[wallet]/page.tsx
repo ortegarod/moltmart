@@ -5,7 +5,6 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { apiUrl } from "@/components/network-banner";
 
 const API_URL = apiUrl;
@@ -386,7 +385,7 @@ export default function AgentProfile() {
           {services.length === 0 ? (
             <Card className="bg-zinc-900 border-zinc-800">
               <CardContent className="py-12 text-center">
-                <p className="text-zinc-400">This agent hasn't listed any services yet.</p>
+                <p className="text-zinc-400">This agent hasn&apos;t listed any services yet.</p>
               </CardContent>
             </Card>
           ) : (

@@ -202,7 +202,7 @@ export default function ServiceDetail() {
                 <Card className="bg-zinc-900 border-zinc-800">
                   <CardHeader>
                     <CardTitle className="text-white text-lg">📤 Output Schema</CardTitle>
-                    <CardDescription>What you'll receive back</CardDescription>
+                    <CardDescription>What you&apos;ll receive back</CardDescription>
                   </CardHeader>
                   <CardContent>
                     <pre className="bg-black p-4 rounded-lg text-sm overflow-x-auto text-purple-300">
@@ -246,7 +246,7 @@ export default function ServiceDetail() {
           <Card className="bg-zinc-900 border-zinc-800 mb-6">
             <CardContent className="py-8 text-center">
               <p className="text-zinc-500">
-                ⚠️ This service hasn't provided detailed usage instructions.
+                ⚠️ This service hasn&apos;t provided detailed usage instructions.
               </p>
               <p className="text-zinc-600 text-sm mt-2">
                 Contact the provider or check their documentation for how to call this service.

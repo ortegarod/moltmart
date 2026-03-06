@@ -7,9 +7,9 @@ import asyncio
 import logging
 import os
 import re
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import AsyncGenerator
 
 from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text, func, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -25,18 +25,18 @@ logger = logging.getLogger(__name__)
 def _get_database_url() -> str:
     """
     Get and normalize the database URL.
-    
+
     Railway uses postgres:// but SQLAlchemy needs postgresql+asyncpg://
     Falls back to SQLite for local development.
     """
     url = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./moltmart.db")
-    
+
     # Normalize PostgreSQL URLs for asyncpg
     if url.startswith("postgres://"):
         url = url.replace("postgres://", "postgresql+asyncpg://", 1)
     elif url.startswith("postgresql://") and "+asyncpg" not in url:
         url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
-    
+
     return url
 
 
@@ -54,12 +54,12 @@ logger.info(f"Database: {_sanitize_url(DATABASE_URL)}")
 def _create_engine():
     """
     Create the async database engine with appropriate settings.
-    
+
     PostgreSQL (production):
     - Small connection pool for Railway free tier
     - Connection recycling to prevent stale connections
     - Pre-ping to detect dead connections
-    
+
     SQLite (development):
     - Simple settings, no pooling needed
     """
@@ -97,7 +97,7 @@ Base = declarative_base()
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """
     Async context manager for database sessions.
-    
+
     Ensures proper cleanup even if an error occurs.
     Usage:
         async with get_session() as session:
@@ -116,7 +116,7 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 async def init_db(max_retries: int = 3, retry_delay: float = 5.0) -> None:
     """
     Initialize database tables with retry logic.
-    
+
     Railway PostgreSQL can be slow to accept connections after restart,
     so we retry a few times before giving up.
     """
@@ -132,7 +132,7 @@ async def init_db(max_retries: int = 3, retry_delay: float = 5.0) -> None:
                 await run_migrations(conn)
             logger.info("Database initialized successfully")
             return
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(f"Connection attempt {attempt} timed out")
             if attempt < max_retries:
                 logger.info(f"Retrying in {retry_delay}s...")
@@ -157,7 +157,7 @@ async def run_migrations(conn) -> None:
     """
     if not IS_POSTGRES:
         return  # SQLite auto-handles this via create_all
-    
+
     migrations = [
         # CRITICAL: endpoint_url was in model but never migrated (fixed 2026-02-05)
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS endpoint_url VARCHAR",
@@ -170,7 +170,7 @@ async def run_migrations(conn) -> None:
         # Soft delete (added 2026-02-05)
         "ALTER TABLE services ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP",
     ]
-    
+
     for sql in migrations:
         try:
             await conn.execute(text(sql))
@@ -196,7 +196,7 @@ class AgentDB(Base):
     github_handle = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
     services_count = Column(Integer, default=0)
-    
+
     # ERC-8004 identity
     has_8004 = Column(Boolean, default=False)
     agent_8004_id = Column(Integer)
@@ -266,28 +266,28 @@ class MintCostDB(Base):
     id = Column(String, primary_key=True)
     recipient_wallet = Column(String, nullable=False, index=True)
     agent_id = Column(Integer)
-    
+
     # Revenue
     revenue_usdc = Column(Float, nullable=False)
-    
+
     # Mint transaction costs
     mint_tx_hash = Column(String)
     mint_gas_used = Column(Integer)
     mint_gas_price_wei = Column(String)
     mint_cost_eth = Column(Float)
-    
+
     # Transfer transaction costs
     transfer_tx_hash = Column(String)
     transfer_gas_used = Column(Integer)
     transfer_gas_price_wei = Column(String)
     transfer_cost_eth = Column(Float)
-    
+
     # Totals
     total_cost_eth = Column(Float)
     total_cost_usd = Column(Float)
     profit_usd = Column(Float)
     eth_price_usd = Column(Float)
-    
+
     created_at = Column(DateTime, default=datetime.utcnow)
     status = Column(String, default="completed")
 
@@ -473,10 +473,10 @@ async def update_service_db(service_id: str, update_data: dict) -> ServiceDB | N
         service = result.scalar_one_or_none()
         if not service:
             return None
-        
+
         for key, value in update_data.items():
             setattr(service, key, value)
-        
+
         await session.commit()
         await session.refresh(service)
         return service
@@ -491,7 +491,7 @@ async def delete_service_db(service_id: str) -> bool:
         service = result.scalar_one_or_none()
         if not service:
             return False
-        
+
         service.deleted_at = datetime.utcnow()
         await session.commit()
         return True
@@ -574,7 +574,7 @@ async def get_recent_mints(limit: int = 10) -> list[MintCostDB]:
 async def get_token_id_from_mint_cache(wallet_address: str) -> int | None:
     """
     Fast lookup of ERC-8004 token ID from our mint cache.
-    
+
     This is MUCH faster than querying blockchain events.
     Only works for tokens we minted, but that's most of them.
     """

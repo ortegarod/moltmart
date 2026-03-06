@@ -13,7 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { NetworkBadge, isTestnet, apiUrl, baseUrl } from "@/components/network-banner";
+import { apiUrl } from "@/components/network-banner";
 
 const API_URL = apiUrl;
 

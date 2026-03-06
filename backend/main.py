@@ -19,6 +19,7 @@ import httpx
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, HttpUrl, validator
@@ -27,6 +28,8 @@ from pydantic import BaseModel, HttpUrl, validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from web3 import Web3
 from x402.http import FacilitatorConfig, HTTPFacilitatorClient, PaymentOption
 from x402.http.middleware.fastapi import PaymentMiddlewareASGI
 from x402.http.types import RouteConfig
@@ -38,17 +41,18 @@ from x402.server import x402ResourceServer
 # Database
 from database import (
     AgentDB,
+    FeedbackDB,
     ServiceDB,
     TransactionDB,
-    FeedbackDB,
     count_agents,
     create_agent,
     create_feedback,
     create_service,
     delete_agent_by_wallet,
+    delete_service_db,
+    get_agent_by_8004_id,
     get_agent_by_api_key,
     get_agent_by_wallet,
-    get_agent_by_8004_id,
     get_agents,
     get_all_services,
     get_feedback_for_service,
@@ -64,14 +68,20 @@ from database import (
     update_agent_api_key,
     update_service_db,
     update_service_stats,
-    delete_service_db,
 )
-from erc8004 import check_connection as check_8004_connection, IDENTITY_REGISTRY, BASE_CHAIN_ID
 
 # ERC-8004 integration
-from erc8004 import get_8004_credentials_simple, get_agent_registry_uri, verify_token_ownership, get_agent_info, get_reputation, give_feedback
+from erc8004 import (
+    BASE_CHAIN_ID,
+    IDENTITY_REGISTRY,
+    get_8004_credentials_simple,
+    get_agent_info,
+    get_reputation,
+    give_feedback,
+    verify_token_ownership,
+)
+from erc8004 import check_connection as check_8004_connection
 from erc8004 import register_agent as mint_8004_identity
-from web3 import Web3
 
 app = FastAPI(
     title="MoltMart API",
@@ -95,14 +105,14 @@ async def log_x402_requests(request: Request, call_next):
             print(f"📦 Payment payload (first 200 chars): {decoded[:200]}...")
         except Exception as e:
             print(f"⚠️ Could not decode payment header: {e}")
-    
+
     response = await call_next(request)
-    
+
     if payment_header and response.status_code == 402:
-        print(f"❌ x402 payment REJECTED - status 402")
+        print("❌ x402 payment REJECTED - status 402")
     elif payment_header and response.status_code == 200:
-        print(f"✅ x402 payment ACCEPTED")
-    
+        print("✅ x402 payment ACCEPTED")
+
     return response
 
 
@@ -149,8 +159,6 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 # Global exception handlers to ensure proper JSON error responses
-from fastapi.exceptions import RequestValidationError
-from starlette.exceptions import HTTPException as StarletteHTTPException
 
 
 @app.exception_handler(RequestValidationError)
@@ -162,7 +170,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         field = ".".join(str(loc) for loc in error["loc"])
         msg = error["msg"]
         error_messages.append(f"{field}: {msg}")
-    
+
     return JSONResponse(
         status_code=422,
         content={
@@ -363,7 +371,7 @@ class AgentRegister(BaseModel):
         if not re.match(r"^0x[a-fA-F0-9]{40}$", v):
             raise ValueError("Invalid Ethereum address format")
         return v.lower()  # normalize to lowercase
-    
+
     @validator("tx_hash")
     def validate_tx_hash(cls, v):
         """Validate transaction hash format"""
@@ -384,7 +392,7 @@ class IdentityMintRequest(BaseModel):
         if not re.match(r"^0x[a-fA-F0-9]{40}$", v):
             raise ValueError("Invalid Ethereum address format")
         return v.lower()
-    
+
     @validator("tx_hash")
     def validate_tx_hash(cls, v):
         """Validate transaction hash format"""
@@ -536,7 +544,7 @@ def db_service_to_response(db_service: ServiceDB) -> ServiceResponse:
             except json.JSONDecodeError:
                 return None
         return None
-    
+
     return ServiceResponse(
         id=db_service.id,
         name=db_service.name,
@@ -635,17 +643,18 @@ async def root():
 async def health():
     # Check ERC-8004 connection
     erc8004_status = check_8004_connection()
-    
+
     chain_name = "Base Sepolia (84532)" if USE_TESTNET else "Base Mainnet (8453)"
-    
+
     # Check if endpoint_url column exists (diagnostic for issue #104)
     db_schema_ok = False
     try:
-        from database import get_session
         from sqlalchemy import text
+
+        from database import get_session
         async with get_session() as session:
             # This query will fail if endpoint_url column doesn't exist
-            result = await session.execute(text("SELECT endpoint_url FROM services LIMIT 1"))
+            await session.execute(text("SELECT endpoint_url FROM services LIMIT 1"))
             db_schema_ok = True
     except Exception as e:
         db_schema_ok = f"ERROR: {e}"
@@ -677,16 +686,16 @@ async def debug_mint_test(mint_request: IdentityMintRequest):
     """
     if not USE_TESTNET:
         raise HTTPException(status_code=403, detail="Debug endpoint only available on testnet")
-    
+
     wallet = mint_request.wallet_address
     print(f"🧪 DEBUG mint test for {wallet}")
-    
+
     # Call the mint function directly
     result = mint_8004_identity(
         agent_uri=f"https://api.moltmart.app/debug/agent/{wallet}",
         recipient_wallet=wallet
     )
-    
+
     if result.get("error"):
         return {
             "success": False,
@@ -696,7 +705,7 @@ async def debug_mint_test(mint_request: IdentityMintRequest):
             "mint_tx_hash": result.get("mint_tx_hash"),
             "stuck_on": result.get("stuck_on"),
         }
-    
+
     return {
         "success": True,
         "wallet_address": wallet,
@@ -713,7 +722,7 @@ async def debug_mint_test(mint_request: IdentityMintRequest):
 
 async def _do_mint_identity(wallet: str, request: Request) -> IdentityMintResponse:
     """Internal function to mint ERC-8004 identity (used by both x402 and on-chain payment endpoints)"""
-    
+
     # Check if already has ERC-8004
     try:
         creds = await get_8004_credentials_simple(wallet)
@@ -757,15 +766,16 @@ async def _do_mint_identity(wallet: str, request: Request) -> IdentityMintRespon
             # Log mint costs to database for unit economics tracking
             if costs:
                 try:
-                    from database import MintCostDB, log_mint_cost
                     import uuid
-                    
+
+                    from database import MintCostDB, log_mint_cost
+
                     eth_price_usd = 2500.0
                     total_cost_eth = costs.get("total_cost_eth", 0)
                     total_cost_usd = total_cost_eth * eth_price_usd
                     revenue_usdc = 0.05
                     profit_usd = revenue_usdc - total_cost_usd
-                    
+
                     mint_cost = MintCostDB(
                         id=str(uuid.uuid4()),
                         recipient_wallet=wallet,
@@ -824,7 +834,7 @@ class OnchainMintRequest(BaseModel):
         if not re.match(r"^0x[a-fA-F0-9]{40}$", v):
             raise ValueError("Invalid Ethereum address format")
         return v.lower()
-    
+
     @validator("tx_hash")
     def validate_tx_hash(cls, v):
         if not re.match(r"^0x[a-fA-F0-9]{64}$", v):
@@ -836,25 +846,25 @@ class OnchainMintRequest(BaseModel):
 async def mint_identity_onchain(mint_request: OnchainMintRequest, request: Request):
     """
     Mint an ERC-8004 identity using on-chain USDC payment.
-    
+
     **For custodial wallets (Bankr) that can't sign x402 payments.**
-    
+
     Flow:
     1. GET /payment/challenge?action=mint&wallet_address=0x...
     2. Send $0.05 USDC to the returned recipient address on Base
     3. POST /identity/mint/onchain with wallet_address and tx_hash
-    
+
     For wallets that CAN sign, use POST /identity/mint (x402) instead - it's automatic.
     """
     wallet = mint_request.wallet_address.lower()
-    
+
     # Verify on-chain USDC payment
     success, error = await verify_usdc_payment(wallet, mint_request.tx_hash, 0.05, "mint")
     if not success:
         raise HTTPException(status_code=400, detail=f"Payment verification failed: {error}")
-    
+
     print(f"✅ On-chain USDC payment verified for {wallet}")
-    
+
     # Do the actual minting
     return await _do_mint_identity(wallet, request)
 
@@ -865,7 +875,7 @@ async def mint_identity(mint_request: IdentityMintRequest, request: Request):
     Mint an ERC-8004 identity NFT on Base mainnet.
 
     💰 Requires x402 payment: $0.05 USDC on Base
-    
+
     **Can't sign x402?** Use POST /identity/mint/onchain instead (for Bankr/custodial wallets).
 
     This gives you an on-chain AI agent identity that you can use to:
@@ -898,57 +908,57 @@ def verify_signature(wallet_address: str, signature: str, message: str) -> bool:
 async def verify_onchain_challenge(wallet_address: str, tx_hash: str) -> tuple[bool, str]:
     """
     Verify an on-chain transaction proves wallet ownership.
-    
+
     Returns (success, error_message)
     """
     wallet = wallet_address.lower()
-    
+
     # Check if we have a pending challenge for this wallet
     if wallet not in onchain_challenges:
         return False, "No pending on-chain challenge. First call GET /agents/challenge/onchain"
-    
+
     challenge = onchain_challenges[wallet]
-    
+
     # Check if expired
     if time.time() > challenge["expires_at"]:
         del onchain_challenges[wallet]
         return False, "Challenge expired. Get a new one from GET /agents/challenge/onchain"
-    
+
     expected_nonce = challenge["nonce"]
     expected_target = challenge["target"].lower()
     expected_calldata = "0x" + expected_nonce
-    
+
     # Verify the transaction on-chain
     try:
         from web3 import Web3
-        
+
         RPC_URL = os.getenv("BASE_RPC_URL", "https://mainnet.base.org")
         w3 = Web3(Web3.HTTPProvider(RPC_URL))
-        
+
         # Get transaction
         tx = w3.eth.get_transaction(tx_hash)
         if tx is None:
             return False, "Transaction not found. Make sure it's confirmed on Base mainnet."
-        
+
         # Verify sender
         if tx["from"].lower() != wallet:
             return False, f"Transaction sender {tx['from']} doesn't match wallet {wallet}"
-        
+
         # Verify target
         if tx["to"] and tx["to"].lower() != expected_target:
             return False, f"Transaction target {tx['to']} doesn't match expected {expected_target}"
-        
+
         # Verify calldata contains our nonce
         # Note: tx["input"] is HexBytes - use w3.to_hex() for proper conversion with 0x prefix
         tx_input = w3.to_hex(tx["input"]).lower() if tx["input"] else "0x"
         if tx_input != expected_calldata.lower():
             return False, f"Transaction calldata doesn't match. Expected {expected_calldata}, got {tx_input}"
-        
+
         # Success! Clean up the challenge
         del onchain_challenges[wallet]
         print(f"✅ On-chain challenge verified for {wallet} via tx {tx_hash}")
         return True, ""
-        
+
     except Exception as e:
         print(f"On-chain verification failed: {e}")
         return False, f"Failed to verify transaction: {str(e)}"
@@ -957,51 +967,51 @@ async def verify_onchain_challenge(wallet_address: str, tx_hash: str) -> tuple[b
 async def verify_usdc_payment(wallet_address: str, tx_hash: str, expected_amount: float, action: str, service_id: str | None = None) -> tuple[bool, str]:
     """
     Verify a USDC payment transaction for on-chain payment flow.
-    
+
     For Bankr/custodial wallets that can send USDC but can't sign x402.
-    
+
     Returns (success, error_message)
     """
     wallet = wallet_address.lower()
-    
+
     # Check if we have a pending payment challenge for this wallet and action
     if action == "call" and service_id:
         challenge_key = f"{wallet}:call:{service_id}"
     else:
         challenge_key = f"{wallet}:{action}"
-    
+
     if challenge_key not in payment_challenges:
         return False, f"No pending payment challenge. First call GET /payment/challenge?action={action}&wallet_address={wallet_address}"
-    
+
     challenge = payment_challenges[challenge_key]
-    
+
     # Check if expired
     if time.time() > challenge["expires_at"]:
         del payment_challenges[challenge_key]
         return False, "Payment challenge expired. Get a new one."
-    
+
     # Get recipient from challenge (can be MoltMart or seller for service calls)
     expected_recipient = challenge.get("recipient", MOLTMART_WALLET).lower()
     expected_amount_raw = int(expected_amount * (10 ** USDC_DECIMALS))
-    
+
     try:
         from web3 import Web3
-        
+
         RPC_URL = os.getenv("BASE_RPC_URL", "https://mainnet.base.org")
         w3 = Web3(Web3.HTTPProvider(RPC_URL))
-        
+
         # Get transaction receipt to check logs
         receipt = w3.eth.get_transaction_receipt(tx_hash)
         if receipt is None:
             return False, "Transaction not found or not confirmed. Wait for confirmation and try again."
-        
+
         if receipt["status"] != 1:
             return False, "Transaction failed on-chain."
-        
+
         # Look for USDC Transfer event
         # Transfer(address indexed from, address indexed to, uint256 value)
         transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
-        
+
         found_valid_transfer = False
         for log in receipt["logs"]:
             # Check if this is a USDC transfer
@@ -1011,12 +1021,12 @@ async def verify_usdc_payment(wallet_address: str, tx_hash: str, expected_amount
                 continue
             if w3.to_hex(log["topics"][0]) != transfer_topic:
                 continue
-            
+
             # Decode from/to addresses (remove padding)
             from_addr = "0x" + w3.to_hex(log["topics"][1])[-40:]
             to_addr = "0x" + w3.to_hex(log["topics"][2])[-40:]
             amount = int(w3.to_hex(log["data"]), 16)
-            
+
             # Verify: from wallet, to MoltMart, correct amount
             if from_addr.lower() == wallet and to_addr.lower() == expected_recipient:
                 if amount >= expected_amount_raw:
@@ -1025,14 +1035,14 @@ async def verify_usdc_payment(wallet_address: str, tx_hash: str, expected_amount
                     break
                 else:
                     return False, f"Amount too low. Expected {expected_amount} USDC, got {amount / 10**6} USDC"
-        
+
         if not found_valid_transfer:
             return False, f"No valid USDC transfer found. Expected transfer from {wallet} to {expected_recipient}"
-        
+
         # Success! Clean up the challenge
         del payment_challenges[challenge_key]
         return True, ""
-        
+
     except Exception as e:
         print(f"USDC payment verification failed: {e}")
         return False, f"Failed to verify payment: {str(e)}"
@@ -1042,26 +1052,26 @@ async def verify_usdc_payment(wallet_address: str, tx_hash: str, expected_amount
 async def get_payment_challenge(action: str, wallet_address: str, service_id: str | None = None):
     """
     Get a payment challenge for on-chain USDC payment (alternative to x402).
-    
+
     For custodial wallets (like Bankr) that can send USDC but can't sign x402 payments.
-    
+
     **Flow:**
     1. Call this endpoint to get payment details
     2. Send USDC to the specified recipient
     3. Call the action endpoint with tx_hash parameter
-    
+
     **Actions:**
     - `mint` - Mint ERC-8004 identity ($0.05 USDC) → recipient: MoltMart
     - `list` - List a service ($0.05 USDC) → recipient: MoltMart
     - `call` - Call a service (service price) → recipient: seller's wallet (requires service_id)
     """
     try:
-        wallet = Web3.to_checksum_address(wallet_address)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid wallet address")
-    
+        Web3.to_checksum_address(wallet_address)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail="Invalid wallet address") from e
+
     wallet_lower = wallet_address.lower()
-    
+
     # Handle different actions
     if action == "mint":
         amount = 0.05
@@ -1085,12 +1095,12 @@ async def get_payment_challenge(action: str, wallet_address: str, service_id: st
         recipient = service.provider_wallet  # Pay seller directly!
         next_step = f"POST /services/{service_id}/call/onchain with tx_hash=0x..."
     else:
-        raise HTTPException(status_code=400, detail=f"Invalid action. Valid actions: mint, list, call")
-    
+        raise HTTPException(status_code=400, detail="Invalid action. Valid actions: mint, list, call")
+
     # Generate unique nonce
     nonce = secrets.token_hex(16)
     expires_at = time.time() + PAYMENT_CHALLENGE_TTL_SECONDS
-    
+
     # Store challenge - include service_id for call action
     challenge_key = f"{wallet_lower}:{action}" if action != "call" else f"{wallet_lower}:call:{service_id}"
     payment_challenges[challenge_key] = {
@@ -1102,7 +1112,7 @@ async def get_payment_challenge(action: str, wallet_address: str, service_id: st
         "service_id": service_id,
         "expires_at": expires_at,
     }
-    
+
     return {
         "action": action,
         "description": description,
@@ -1147,21 +1157,21 @@ class AgentListResponse(BaseModel):
 async def list_agents(request: Request, limit: int = 50, offset: int = 0):
     """
     List all registered agents on MoltMart.
-    
+
     Returns public profiles (no API keys).
     """
     import time
-    
+
     start = time.time()
     db_agents = await get_agents(limit=limit, offset=offset)
     t1 = time.time()
     print(f"⏱️ get_agents(): {(t1-start)*1000:.0f}ms")
-    
+
     total = await count_agents()
     t2 = time.time()
     print(f"⏱️ count_agents(): {(t2-t1)*1000:.0f}ms")
     print(f"⏱️ TOTAL DB: {(t2-start)*1000:.0f}ms")
-    
+
     agents = [
         AgentPublicProfile(
             id=a.id,
@@ -1177,7 +1187,7 @@ async def list_agents(request: Request, limit: int = 50, offset: int = 0):
         )
         for a in db_agents
     ]
-    
+
     return AgentListResponse(agents=agents, total=total, limit=limit, offset=offset)
 
 
@@ -1186,15 +1196,15 @@ async def list_agents(request: Request, limit: int = 50, offset: int = 0):
 async def get_agent_by_wallet_endpoint(wallet_address: str, request: Request):
     """
     Get a single agent by wallet address.
-    
+
     Returns public profile (no API key).
     """
     wallet_lower = wallet_address.lower()
     db_agent = await get_agent_by_wallet(wallet_lower)
-    
+
     if not db_agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    
+
     return AgentPublicProfile(
         id=db_agent.id,
         name=db_agent.name,
@@ -1215,7 +1225,7 @@ async def get_registration_challenge():
     Get the challenge message to sign for registration (off-chain method).
 
     Sign this message with your wallet to prove ownership.
-    
+
     ⚠️ If your wallet can't sign messages (e.g., Bankr, custodial wallets),
     use GET /agents/challenge/onchain instead.
     """
@@ -1232,38 +1242,38 @@ async def get_onchain_challenge(wallet_address: str):
     Get an on-chain challenge for registration (for custodial wallets).
 
     Use this if your wallet can't sign arbitrary messages (e.g., Bankr).
-    
+
     Flow:
     1. Call this endpoint with your wallet address
     2. Send 0 ETH to the target address with the provided calldata
     3. Wait for tx confirmation
     4. POST to /agents/register with tx_hash instead of signature
-    
+
     The transaction proves you control the wallet.
     """
     wallet = wallet_address.lower()
-    
+
     # Clean expired challenges
     now = time.time()
     expired = [w for w, c in onchain_challenges.items() if c["expires_at"] < now]
     for w in expired:
         del onchain_challenges[w]
-    
+
     # Generate unique nonce
     nonce = secrets.token_hex(16)
     expires_at = now + CHALLENGE_TTL_SECONDS
-    
+
     # Calldata is just the nonce encoded as hex (prepended with 0x)
     # Simple: just the nonce bytes
     calldata = "0x" + nonce
-    
+
     # Store challenge
     onchain_challenges[wallet] = {
         "nonce": nonce,
         "expires_at": expires_at,
         "target": ONCHAIN_CHALLENGE_TARGET,
     }
-    
+
     return {
         "wallet": wallet,
         "target": ONCHAIN_CHALLENGE_TARGET,
@@ -1284,7 +1294,7 @@ async def register_agent(agent_data: AgentRegister, request: Request):
     🆓 FREE - ERC-8004 identity optional but recommended!
 
     To register (choose ONE method):
-    
+
     **Method A: Off-chain signature** (if your wallet supports signing)
     1. Sign the challenge message (GET /agents/challenge)
     2. Submit registration with `signature`
@@ -1328,7 +1338,7 @@ async def register_agent(agent_data: AgentRegister, request: Request):
     agent_8004_registry = None
     scan_url = None
     has_8004 = False
-    
+
     try:
         # If user provided their token ID, verify they own it (fast!)
         if agent_data.erc8004_id is not None:
@@ -1424,7 +1434,7 @@ async def recover_api_key(request: RecoverKeyRequest):
     Recover your API key if you lost it.
 
     🔑 Generates a new API key for your registered wallet.
-    
+
     **Requirements:**
     - Your wallet must already be registered on MoltMart
     - Prove wallet ownership via signature OR on-chain tx
@@ -1496,28 +1506,28 @@ class Update8004Request(BaseModel):
 async def update_my_8004(request: Update8004Request, agent: Agent = Depends(require_agent)):
     """
     Update your ERC-8004 token ID.
-    
+
     Verifies on-chain that you actually own the token before updating.
     Use this if your token ID wasn't saved during registration.
-    
+
     Requires X-API-Key header.
     """
     token_id = request.agent_8004_id
-    
+
     # Verify on-chain ownership
     ownership = verify_token_ownership(token_id, agent.wallet_address)
-    
+
     if not ownership.get("verified"):
         raise HTTPException(
-            status_code=403, 
+            status_code=403,
             detail=f"Token #{token_id} is not owned by your wallet. Owner: {ownership.get('owner', 'unknown')}"
         )
-    
+
     # Update database
-    from database import get_session
     from sqlalchemy import update
-    from database import AgentDB
-    
+
+    from database import AgentDB, get_session
+
     async with get_session() as session:
         await session.execute(
             update(AgentDB)
@@ -1530,9 +1540,9 @@ async def update_my_8004(request: Update8004Request, agent: Agent = Depends(requ
             )
         )
         await session.commit()
-    
+
     print(f"✅ Agent {agent.name} updated ERC-8004 to #{token_id}")
-    
+
     return {
         "success": True,
         "message": f"Updated ERC-8004 token ID to #{token_id}",
@@ -1595,13 +1605,13 @@ async def get_agent_profile_json(agent_id: str, request: Request):
 async def get_8004_onchain_profile(agent_id: int):
     """
     Fetch full on-chain ERC-8004 profile for an agent.
-    
+
     Pulls directly from the Identity Registry contract:
     - Token owner
     - Token URI (metadata URL)
     - Agent wallet
     - Fetches and returns the actual metadata JSON
-    
+
     Free endpoint - no payment required.
     """
     try:
@@ -1609,7 +1619,7 @@ async def get_8004_onchain_profile(agent_id: int):
         agent_info = get_agent_info(agent_id)
         if "error" in agent_info:
             raise HTTPException(status_code=404, detail=agent_info["error"])
-        
+
         result = {
             "agent_id": agent_id,
             "owner": agent_info.get("owner"),
@@ -1620,7 +1630,7 @@ async def get_8004_onchain_profile(agent_id: int):
             "chain_id": BASE_CHAIN_ID,
             "basescan_url": f"https://basescan.org/nft/{IDENTITY_REGISTRY}/{agent_id}",
         }
-        
+
         # Try to fetch the metadata from the token URI
         token_uri = agent_info.get("uri")
         if token_uri:
@@ -1628,20 +1638,20 @@ async def get_8004_onchain_profile(agent_id: int):
                 # Handle IPFS URIs
                 if token_uri.startswith("ipfs://"):
                     token_uri = token_uri.replace("ipfs://", "https://ipfs.io/ipfs/")
-                
+
                 async with httpx.AsyncClient(timeout=5.0) as client:
                     resp = await client.get(token_uri)
                     if resp.status_code == 200:
                         result["metadata"] = resp.json()
             except Exception as e:
                 result["metadata_error"] = str(e)
-        
+
         return result
-        
+
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching ERC-8004 profile: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching ERC-8004 profile: {str(e)}") from e
 
 
 @app.get("/agents/8004/{wallet_address}")
@@ -1654,7 +1664,7 @@ async def check_8004_credentials(wallet_address: str):
     Free endpoint - no payment required.
     """
     wallet = wallet_address.lower()
-    
+
     # First, check if this wallet is registered in our database (fast!)
     db_agent = await get_agent_by_wallet(wallet)
     if db_agent and db_agent.has_8004:
@@ -1671,7 +1681,7 @@ async def check_8004_credentials(wallet_address: str):
                 scan_url=db_agent.scan_url,
             ),
         }
-    
+
     # Not in our database - fall back to blockchain query
     try:
         creds = await get_8004_credentials_simple(wallet_address)
@@ -1703,18 +1713,18 @@ async def check_8004_credentials(wallet_address: str):
 async def get_agent_reputation(agent_id: int, tag: str = ""):
     """
     Get on-chain reputation for an ERC-8004 agent.
-    
+
     Returns the cumulative reputation score from the ReputationRegistry contract.
     Higher scores indicate more positive feedback from service transactions.
-    
+
     - **agent_id**: The ERC-8004 token ID
     - **tag**: Optional tag to filter reputation by category (e.g., "service")
-    
+
     Free endpoint - no payment required.
     """
     try:
         rep = get_reputation(agent_id, tag)
-        
+
         # If there's an error querying on-chain, return empty reputation (agent is new)
         if "error" in rep:
             return {
@@ -1727,7 +1737,7 @@ async def get_agent_reputation(agent_id: int, tag: str = ""):
                 "contract": "0x8004BAa17C55a88189AE136b182e5fdA19dE9b63",
                 "status": "new",  # No feedback yet
             }
-        
+
         return {
             "agent_id": agent_id,
             "tag": tag or "all",
@@ -1756,22 +1766,22 @@ async def get_agent_reputation(agent_id: int, tag: str = ""):
 async def get_agent_reputation_by_wallet(wallet: str, tag: str = ""):
     """
     Get on-chain reputation for an agent by wallet address.
-    
+
     Convenience endpoint that looks up the agent's ERC-8004 token ID
     and returns their on-chain reputation from the ReputationRegistry.
-    
+
     - **wallet**: The agent's wallet address
     - **tag**: Optional tag to filter reputation by category (e.g., "service")
-    
+
     Returns both on-chain reputation AND MoltMart review stats.
     """
     wallet_lower = wallet.lower()
-    
+
     # Get agent from our database
     db_agent = await get_agent_by_wallet(wallet_lower)
     if not db_agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    
+
     result = {
         "wallet": wallet_lower,
         "agent_name": db_agent.name,
@@ -1783,7 +1793,7 @@ async def get_agent_reputation_by_wallet(wallet: str, tag: str = ""):
         },
         "onchain_reputation": None,
     }
-    
+
     # Get MoltMart review stats (from services this agent provides)
     try:
         services = await get_services(provider_wallet=wallet_lower)
@@ -1794,7 +1804,7 @@ async def get_agent_reputation_by_wallet(wallet: str, tag: str = ""):
             if summary and summary.get("review_count", 0) > 0:
                 total_reviews += summary["review_count"]
                 total_rating += summary["average_rating"] * summary["review_count"]
-        
+
         if total_reviews > 0:
             result["moltmart_reviews"] = {
                 "count": total_reviews,
@@ -1802,7 +1812,7 @@ async def get_agent_reputation_by_wallet(wallet: str, tag: str = ""):
             }
     except Exception as e:
         print(f"Failed to get MoltMart reviews for {wallet}: {e}")
-    
+
     # Get on-chain reputation if they have ERC-8004
     if db_agent.has_8004 and db_agent.agent_8004_id:
         try:
@@ -1819,7 +1829,7 @@ async def get_agent_reputation_by_wallet(wallet: str, tag: str = ""):
                 }
         except Exception as e:
             print(f"Failed to get on-chain reputation for {wallet}: {e}")
-    
+
     return result
 
 
@@ -1830,7 +1840,7 @@ async def get_agent_reputation_by_wallet(wallet: str, tag: str = ""):
 
 class ServiceCreateOnchain(BaseModel):
     """Create service via on-chain USDC payment (for Bankr/custodial wallets)"""
-    
+
     name: str
     description: str
     endpoint_url: HttpUrl
@@ -1843,7 +1853,7 @@ class ServiceCreateOnchain(BaseModel):
     output_schema: dict | None = None
     example_request: dict | None = None
     example_response: dict | None = None
-    
+
     @validator("tx_hash")
     def validate_tx_hash(cls, v):
         if not re.match(r"^0x[a-fA-F0-9]{64}$", v):
@@ -1853,7 +1863,7 @@ class ServiceCreateOnchain(BaseModel):
 
 async def _do_create_service(service_data: ServiceCreate, agent: Agent) -> ServiceCreateResponse:
     """Internal function to create service (used by both x402 and on-chain payment endpoints)"""
-    
+
     # Check ERC-8004 identity (required to list services)
     creds = await get_8004_credentials_simple(agent.wallet_address)
     if not creds or not creds.get("has_8004"):
@@ -1861,7 +1871,7 @@ async def _do_create_service(service_data: ServiceCreate, agent: Agent) -> Servi
             status_code=403,
             detail="ERC-8004 identity required to list services. Get one at POST /identity/mint ($0.05) or mint directly on the contract at 0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
         )
-    
+
     # Check rate limits
     allowed, error_info = check_rate_limit(agent.api_key)
     if not allowed:
@@ -1933,14 +1943,14 @@ async def create_service_onchain(
 ):
     """
     List a service using on-chain USDC payment.
-    
+
     **For custodial wallets (Bankr) that can't sign x402 payments.**
-    
+
     Flow:
     1. GET /payment/challenge?action=list&wallet_address=0x...
     2. Send $0.05 USDC to the returned recipient address on Base
     3. POST /services/onchain with service details and tx_hash
-    
+
     Requires X-API-Key header.
     For wallets that CAN sign, use POST /services (x402) instead.
     """
@@ -1948,9 +1958,9 @@ async def create_service_onchain(
     success, error = await verify_usdc_payment(agent.wallet_address, service.tx_hash, 0.05, "list")
     if not success:
         raise HTTPException(status_code=400, detail=f"Payment verification failed: {error}")
-    
+
     print(f"✅ On-chain USDC payment verified for service listing by {agent.name}")
-    
+
     # Create the service data object
     service_data = ServiceCreate(
         name=service.name,
@@ -1965,7 +1975,7 @@ async def create_service_onchain(
         example_request=service.example_request,
         example_response=service.example_response,
     )
-    
+
     return await _do_create_service(service_data, agent)
 
 
@@ -1978,7 +1988,7 @@ async def create_service_endpoint(service: ServiceCreate, agent: Agent = Depends
     ⏱️ Rate limited: 3 per hour, 10 per day
 
     Requires X-API-Key header with your agent's API key.
-    
+
     **Don't have ERC-8004?** Get one at POST /identity/mint ($0.05)
     or mint directly on contract 0x8004A169FB4a3325136EB29fA0ceB6D2e539a432
 
@@ -2050,22 +2060,22 @@ async def update_service(
 ):
     """
     Update your service listing (FREE - you already paid to list).
-    
+
     Only the service owner can update. All fields are optional.
     Use this to add/update storefront details like usage_instructions,
     input_schema, output_schema, and examples.
-    
+
     Requires X-API-Key header.
     """
     # Get the service
     db_service = await get_service(service_id)
     if not db_service:
         raise HTTPException(status_code=404, detail="Service not found")
-    
+
     # Verify ownership
     if db_service.provider_wallet.lower() != agent.wallet_address.lower():
         raise HTTPException(status_code=403, detail="You can only update your own services")
-    
+
     # Build update dict with only provided fields
     update_data = {}
     if update.name is not None:
@@ -2088,15 +2098,15 @@ async def update_service(
         update_data["example_request"] = json.dumps(update.example_request)
     if update.example_response is not None:
         update_data["example_response"] = json.dumps(update.example_response)
-    
+
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
-    
+
     # Update in database
     updated = await update_service_db(service_id, update_data)
     if not updated:
         raise HTTPException(status_code=500, detail="Failed to update service")
-    
+
     print(f"✅ Service {service_id} updated by {agent.name}")
     return db_service_to_response(updated)
 
@@ -2108,27 +2118,27 @@ async def delete_service(
 ):
     """
     Delete your service listing.
-    
-    Only the service owner can delete. This is a soft delete - 
+
+    Only the service owner can delete. This is a soft delete -
     the service is marked as deleted but retained in the database
     for audit purposes.
-    
+
     Requires X-API-Key header.
     """
     # Get the service
     db_service = await get_service(service_id)
     if not db_service:
         raise HTTPException(status_code=404, detail="Service not found")
-    
+
     # Verify ownership
     if db_service.provider_wallet.lower() != agent.wallet_address.lower():
         raise HTTPException(status_code=403, detail="You can only delete your own services")
-    
+
     # Soft delete - mark as deleted
     deleted = await delete_service_db(service_id)
     if not deleted:
         raise HTTPException(status_code=500, detail="Failed to delete service")
-    
+
     print(f"🗑️ Service {service_id} deleted by {agent.name}")
     return {"success": True, "message": f"Service '{db_service.name}' deleted"}
 
@@ -2260,7 +2270,7 @@ async def submit_review(review: ReviewRequest, agent: Agent = Depends(require_ag
 async def get_service_reviews(request: Request, service_id: str):
     """
     Get reviews for a service.
-    
+
     Returns aggregate rating and list of verified reviews.
     All reviews are from verified purchasers only.
     """
@@ -2270,7 +2280,7 @@ async def get_service_reviews(request: Request, service_id: str):
 
     # Get reviews from database
     reviews = await get_feedback_for_service(service_id)
-    
+
     # Get aggregate stats
     stats = await get_service_rating_summary(service_id)
 
@@ -2605,7 +2615,7 @@ class ServiceCallOnchainRequest(BaseModel):
     """Request body for on-chain service call"""
     tx_hash: str  # USDC payment to seller transaction hash
     request_data: dict | None = None  # Optional data to forward to seller
-    
+
     @validator("tx_hash")
     def validate_tx_hash(cls, v):
         if not re.match(r"^0x[a-fA-F0-9]{64}$", v):
@@ -2615,51 +2625,51 @@ class ServiceCallOnchainRequest(BaseModel):
 
 @app.post("/services/{service_id}/call/onchain")
 async def call_service_onchain(
-    service_id: str, 
+    service_id: str,
     call_request: ServiceCallOnchainRequest,
     agent: Agent = Depends(require_agent)
 ):
     """
     Call a service using on-chain USDC payment (alternative to x402).
-    
+
     **For custodial wallets (Bankr) that can't sign x402 payments.**
-    
+
     Flow:
     1. GET /payment/challenge?action=call&service_id={id}&wallet_address=0x...
     2. Send the service price in USDC to the seller's wallet on Base
     3. POST /services/{id}/call/onchain with tx_hash and optional request_data
-    
+
     The payment goes directly to the seller - MoltMart just verifies it happened.
     """
     # Get service
     service = await get_service(service_id)
     if not service:
         raise HTTPException(status_code=404, detail="Service not found")
-    
+
     if not service.endpoint_url:
         raise HTTPException(status_code=400, detail="This service does not have a callable endpoint")
-    
+
     # Verify on-chain USDC payment to seller
     success, error = await verify_usdc_payment(
-        agent.wallet_address, 
-        call_request.tx_hash, 
-        service.price_usdc, 
+        agent.wallet_address,
+        call_request.tx_hash,
+        service.price_usdc,
         "call",
         service_id=service_id
     )
     if not success:
         raise HTTPException(status_code=400, detail=f"Payment verification failed: {error}")
-    
+
     print(f"✅ On-chain USDC payment verified: {agent.name} paid {service.price_usdc} USDC to {service.provider_wallet}")
-    
+
     # ============ PAYMENT VERIFIED - FORWARD TO SELLER ============
-    
+
     body_str = json.dumps(call_request.request_data) if call_request.request_data else ""
-    
+
     # Generate transaction ID
     tx_id = f"mm_tx_{secrets.token_urlsafe(16)}"
     timestamp = int(time.time())
-    
+
     # Generate HMAC signature
     signature = generate_hmac_signature(
         body_str,
@@ -2667,7 +2677,7 @@ async def call_service_onchain(
         service_id,
         service.secret_token_hash,
     )
-    
+
     # Prepare headers for seller
     headers = {
         "Content-Type": "application/json",
@@ -2680,7 +2690,7 @@ async def call_service_onchain(
         "X-MoltMart-Service": service_id,
         "X-MoltMart-Payment-Method": "onchain",  # Indicate this was an on-chain payment
     }
-    
+
     # Create transaction record for database
     tx_record = TransactionDB(
         id=tx_id,
@@ -2692,7 +2702,7 @@ async def call_service_onchain(
         price_usdc=service.price_usdc,
         status="pending",
     )
-    
+
     # Forward request to seller's endpoint
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -2701,20 +2711,20 @@ async def call_service_onchain(
                 content=body_str.encode() if body_str else b"",
                 headers=headers,
             )
-        
+
         # Update transaction status
         tx_record.status = "completed" if response.status_code == 200 else "failed"
         tx_record.seller_response_code = response.status_code
-        
+
         # Update service stats
         if response.status_code == 200:
             await update_service_stats(service_id, calls_delta=1, revenue_delta=service.price_usdc)
         else:
             await update_service_stats(service_id, calls_delta=1, revenue_delta=0)
-        
+
         # Log to database
         await log_transaction(tx_record)
-        
+
         return Response(
             content=response.content,
             status_code=response.status_code,
@@ -2725,7 +2735,7 @@ async def call_service_onchain(
             },
             media_type=response.headers.get("content-type", "application/json"),
         )
-    
+
     except httpx.TimeoutException as e:
         tx_record.status = "timeout"
         await log_transaction(tx_record)

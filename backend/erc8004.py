@@ -126,23 +126,23 @@ def register_agent(agent_uri: str, recipient_wallet: str = None) -> dict:
         if recipient_wallet and agent_id is not None:
             try:
                 recipient = Web3.to_checksum_address(recipient_wallet)
-                
+
                 # Small delay to let RPC node state propagate after mint confirmation
                 import time
                 time.sleep(2)
-                
+
                 # Use 'pending' to include any pending transactions in nonce count
                 nonce = w3.eth.get_transaction_count(account.address, 'pending')
                 print(f"🔢 Transfer nonce (pending): {nonce}")
-                
+
                 # Check operator balance for gas
                 operator_balance = w3.eth.get_balance(account.address)
                 print(f"💰 Operator balance: {w3.from_wei(operator_balance, 'ether')} ETH")
-                
+
                 # Use slightly higher gas price to avoid "replacement transaction underpriced"
                 current_gas_price = w3.eth.gas_price
                 bumped_gas_price = int(current_gas_price * 1.2)  # 20% bump
-                
+
                 transfer_tx = identity_registry.functions.transferFrom(
                     account.address,
                     recipient,
@@ -154,13 +154,13 @@ def register_agent(agent_uri: str, recipient_wallet: str = None) -> dict:
                     "gasPrice": bumped_gas_price,
                     "chainId": BASE_CHAIN_ID,
                 })
-                
+
                 print(f"📝 Transfer TX built: gas={transfer_tx['gas']}, gasPrice={transfer_tx['gasPrice']}")
-                
+
                 signed_transfer = account.sign_transaction(transfer_tx)
                 transfer_tx_hash = w3.eth.send_raw_transaction(signed_transfer.raw_transaction)
                 print(f"📤 Transfer TX sent: {transfer_tx_hash.hex()}")
-                
+
                 transfer_receipt = w3.eth.wait_for_transaction_receipt(transfer_tx_hash, timeout=60)
                 print(f"✅ Transferred ERC-8004 #{agent_id} to {recipient} (block {transfer_receipt.blockNumber})")
             except Exception as e:
@@ -184,7 +184,7 @@ def register_agent(agent_uri: str, recipient_wallet: str = None) -> dict:
         mint_gas_used = receipt.gasUsed
         mint_gas_price = receipt.effectiveGasPrice
         mint_cost_eth = float(w3.from_wei(mint_gas_used * mint_gas_price, 'ether'))
-        
+
         transfer_gas_used = 0
         transfer_gas_price = 0
         transfer_cost_eth = 0.0
@@ -192,9 +192,9 @@ def register_agent(agent_uri: str, recipient_wallet: str = None) -> dict:
             transfer_gas_used = transfer_receipt.gasUsed
             transfer_gas_price = transfer_receipt.effectiveGasPrice
             transfer_cost_eth = float(w3.from_wei(transfer_gas_used * transfer_gas_price, 'ether'))
-        
+
         total_cost_eth = mint_cost_eth + transfer_cost_eth
-        
+
         return {
             "success": True,
             "agent_id": agent_id,
@@ -242,7 +242,7 @@ def verify_token_ownership(agent_id: int, wallet_address: str) -> dict:
     """
     Verify that a wallet owns a specific ERC-8004 token.
     Fast, single contract call.
-    
+
     Returns: {"verified": True/False, "owner": actual_owner}
     """
     if not identity_registry:
@@ -251,7 +251,7 @@ def verify_token_ownership(agent_id: int, wallet_address: str) -> dict:
     try:
         wallet = Web3.to_checksum_address(wallet_address)
         owner = identity_registry.functions.ownerOf(agent_id).call()
-        
+
         verified = owner.lower() == wallet.lower()
         return {
             "verified": verified,
@@ -331,7 +331,7 @@ def get_reputation(agent_id: int, tag: str = "") -> dict:
     try:
         # First get the list of clients who have given feedback
         clients = reputation_registry.functions.getClients(agent_id).call()
-        
+
         # If no clients, agent has no feedback yet
         if not clients:
             return {
@@ -340,7 +340,7 @@ def get_reputation(agent_id: int, tag: str = "") -> dict:
                 "reputation_score": 0,
                 "decimals": 0,
             }
-        
+
         # getSummary(agentId, clientAddresses[], tag1, tag2)
         count, value, decimals = reputation_registry.functions.getSummary(
             agent_id,
@@ -373,12 +373,12 @@ _CACHE_TTL_SECONDS = 60  # Cache for 60 seconds
 def check_connection() -> dict:
     """Verify connection to Base and contract access (cached for 60s)"""
     import time
-    
+
     # Return cached result if still valid
     now = time.time()
     if _connection_cache["data"] and (now - _connection_cache["timestamp"]) < _CACHE_TTL_SECONDS:
         return _connection_cache["data"]
-    
+
     try:
         connected = w3.is_connected()
         block = w3.eth.block_number if connected else None
@@ -401,11 +401,11 @@ def check_connection() -> dict:
             "identity_abi_loaded": bool(IDENTITY_ABI),
             "reputation_abi_loaded": bool(REPUTATION_ABI),
         }
-        
+
         # Update cache
         _connection_cache["data"] = result
         _connection_cache["timestamp"] = now
-        
+
         return result
     except Exception as e:
         return {"error": str(e)}
@@ -417,7 +417,7 @@ async def get_8004_credentials_simple(wallet_address: str) -> dict | None:
     Returns credentials dict or None.
 
     This is used during registration to display existing ERC-8004 identity.
-    
+
     OPTIMIZED: First checks our mint cache (fast DB query) before falling back
     to slow blockchain event queries.
     """
@@ -448,7 +448,7 @@ async def get_8004_credentials_simple(wallet_address: str) -> dict | None:
                     print(f"⚠️ Cached token {cached_id} no longer owned by {wallet}")
         except Exception as e:
             print(f"⚠️ Cache lookup failed: {e}")
-        
+
         # If cache miss, skip the slow event query for now
         # Just return with agent_id=None - the balance check is sufficient proof
         if agent_id is None:
