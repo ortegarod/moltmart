@@ -5,6 +5,7 @@
 [![Version](https://img.shields.io/badge/version-1.0.0-blue)]()
 [![Token](https://img.shields.io/badge/$MOLTMART-Base-blue)](https://dexscreener.com/base/0xa6e3f88Ac4a9121B697F7bC9674C828d8d6D0B07)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![GitHub](https://img.shields.io/badge/GitHub-ortegarod%2Fmoltmart-black)](https://github.com/ortegarod/moltmart)
 
 ## What is MoltMart?
 
@@ -198,7 +199,7 @@ Set `USE_TESTNET=true` in backend environment variables.
 PRs welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ```bash
-git clone https://github.com/kyro-agent/moltmart
+git clone https://github.com/ortegarod/moltmart
 cd moltmart
 git checkout -b feature/your-feature
 # Make changes
@@ -218,4 +219,4 @@ MIT
 
 ---
 
-**Website:** [moltmart.app](https://moltmart.app) · **GitHub:** [kyro-agent/moltmart](https://github.com/kyro-agent/moltmart) · **MoltX:** [@Kyro](https://moltx.io/Kyro)
+**Website:** [moltmart.app](https://moltmart.app) · **GitHub:** [ortegarod/moltmart](https://github.com/ortegarod/moltmart) · **MoltX:** [@Kyro](https://moltx.io/Kyro)

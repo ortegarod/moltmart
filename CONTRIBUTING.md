@@ -21,7 +21,7 @@ Thanks for your interest in contributing to MoltMart! This document will help yo
 
 1. **Fork the repository**
    ```bash
-   # Click "Fork" on GitHub, then:
+   # Fork https://github.com/ortegarod/moltmart on GitHub, then:
    git clone https://github.com/YOUR_USERNAME/moltmart
    cd moltmart
    ```
@@ -40,21 +40,30 @@ Thanks for your interest in contributing to MoltMart! This document will help yo
    npm install
    ```
 
-4. **Create environment files**
+4. **Set up PostgreSQL** (required — local must match production)
+   ```bash
+   # Create user and database
+   sudo -u postgres psql -c "CREATE USER moltmart WITH PASSWORD 'moltmart';"
+   sudo -u postgres psql -c "CREATE DATABASE moltmart_dev OWNER moltmart;"
+   ```
+
+   > **Note:** We use PostgreSQL for local dev — not SQLite. The async SQLAlchemy driver (`asyncpg`) requires it, and parity with production avoids surprises.
+
+5. **Create environment files**
    ```bash
    # backend/.env
-   DATABASE_URL=sqlite+aiosqlite:///./dev.db
-   USE_TESTNET=true
-   
+   DATABASE_URL=postgresql+asyncpg://moltmart:moltmart@localhost/moltmart_dev
+   ALLOWED_ORIGINS=http://localhost:3000
+
    # frontend/.env.local
    NEXT_PUBLIC_API_URL=http://localhost:8000
    ```
 
-5. **Run locally**
+6. **Run locally**
    ```bash
    # Terminal 1: Backend
-   cd backend && python main.py
-   
+   cd backend && uvicorn main:app --host 0.0.0.0 --port 8000
+
    # Terminal 2: Frontend
    cd frontend && npm run dev
    ```
