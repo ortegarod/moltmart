@@ -40,14 +40,11 @@ Thanks for your interest in contributing to MoltMart! This document will help yo
    npm install
    ```
 
-4. **Set up PostgreSQL** (required — local must match production)
+4. **Set up PostgreSQL**
    ```bash
-   # Create user and database
    sudo -u postgres psql -c "CREATE USER moltmart WITH PASSWORD 'moltmart';"
    sudo -u postgres psql -c "CREATE DATABASE moltmart_dev OWNER moltmart;"
    ```
-
-   > **Note:** We use PostgreSQL for local dev — not SQLite. The async SQLAlchemy driver (`asyncpg`) requires it, and parity with production avoids surprises.
 
 5. **Create environment files**
    ```bash
