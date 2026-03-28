@@ -1866,12 +1866,11 @@ class ServiceCreateOnchain(BaseModel):
 async def _do_create_service(service_data: ServiceCreate, agent: Agent) -> ServiceCreateResponse:
     """Internal function to create service (used by both x402 and on-chain payment endpoints)"""
 
-    # Check ERC-8004 identity (required to list services)
-    creds = await get_8004_credentials_simple(agent.wallet_address)
-    if not creds or not creds.get("has_8004"):
+    # Check ERC-8004 identity from DB (required to list services — no chain re-query needed)
+    if not (agent.erc8004 and agent.erc8004.has_8004):
         raise HTTPException(
             status_code=403,
-            detail="ERC-8004 identity required to list services. Get one at POST /identity/mint ($0.05) or mint directly on the contract at 0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
+            detail="ERC-8004 identity required to list services. Get one at POST /identity/mint ($0.05 if you don't have one) or mint directly on the contract at 0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
         )
 
     # Check rate limits
@@ -2265,20 +2264,19 @@ async def submit_review(review: ReviewRequest, agent: Agent = Depends(require_ag
     # Submit to ERC-8004 on-chain (if seller has ERC-8004 identity)
     onchain_result = None
     if db_service.provider_wallet:
-        # Get seller's ERC-8004 agent_id
-        seller_8004 = await get_8004_credentials_simple(db_service.provider_wallet)
-        if seller_8004 and seller_8004.get("agent_id"):
-            # Convert 1-5 rating to positive/negative value
-            # 4-5 stars = positive, 1-2 = negative, 3 = neutral
+        # Get seller's ERC-8004 agent_id from DB (no chain re-query)
+        seller_agent = await get_agent_by_wallet(db_service.provider_wallet)
+        if seller_agent and seller_agent.has_8004 and seller_agent.agent_8004_id:
+            # Convert 1-5 stars to signed value: 4-5 = positive, 1-2 = negative, 3 = neutral
             value = review.rating - 3  # -2 to +2
             try:
                 onchain_result = give_feedback(
-                    agent_id=seller_8004["agent_id"],
+                    agent_id=seller_agent.agent_8004_id,
                     value=value,
                     tag="service"
                 )
             except Exception as e:
-                # Log but don't fail - on-chain is bonus, not required
+                # Log but don't fail — on-chain reputation is bonus, not blocking
                 print(f"⚠️ Failed to submit on-chain feedback: {e}")
 
     return {
@@ -2310,13 +2308,13 @@ async def get_service_reviews(request: Request, service_id: str):
     # Get aggregate stats
     stats = await get_service_rating_summary(service_id)
 
-    # Also try to get ERC-8004 on-chain reputation if seller has it
+    # Also try to get ERC-8004 on-chain reputation if seller has it (use DB, no chain re-query)
     onchain_reputation = None
     if db_service.provider_wallet:
-        seller_8004 = await get_8004_credentials_simple(db_service.provider_wallet)
-        if seller_8004 and seller_8004.get("agent_id"):
+        seller_agent = await get_agent_by_wallet(db_service.provider_wallet)
+        if seller_agent and seller_agent.has_8004 and seller_agent.agent_8004_id:
             try:
-                onchain_reputation = get_reputation(seller_8004["agent_id"], tag="service")
+                onchain_reputation = get_reputation(seller_agent.agent_8004_id, tag="service")
             except Exception:
                 pass
 
