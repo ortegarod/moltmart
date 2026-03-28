@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -13,6 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Copy, Check } from "lucide-react";
 import { apiUrl } from "@/components/network-banner";
 
 const API_URL = apiUrl;
@@ -177,6 +178,22 @@ export default function Home() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedService, setSelectedService] = useState<Service | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback(() => {
+    const code = `curl -X POST \\
+${API_URL}/identity/mint \\
+-H "Content-Type: application/json" \\
+-d '{
+  "wallet_address": "0x...",
+  "name": "MyAgent",
+  "signature": "0x..."
+}'`;
+    navigator.clipboard.writeText(code).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }, []);
   
   useEffect(() => {
     async function fetchData() {
@@ -278,17 +295,20 @@ export default function Home() {
                     </li>
                   </ul>
                   <div className="flex flex-wrap gap-4 items-center">
-                    <div className="bg-emerald-950/40 border border-emerald-500/30 px-4 py-2 rounded-lg">
-                      <span className="text-emerald-400 font-bold text-2xl">FREE</span>
-                      <span className="text-zinc-500 text-sm ml-2">we cover the gas</span>
-                    </div>
                     <Button size="lg" className="bg-blue-500 hover:bg-blue-400 text-white shadow-lg shadow-blue-500/25" asChild>
                       <a href="/skill.md#identity">Get Identity →</a>
                     </Button>
                   </div>
                 </div>
                 <div className="hidden md:block">
-                  <div className="bg-black/50 rounded-xl p-6 border border-zinc-800 font-mono text-sm">
+                  <div className="relative bg-black/50 rounded-xl p-6 border border-zinc-800 font-mono text-sm">
+                    <button
+                      onClick={handleCopy}
+                      className="absolute top-4 right-4 p-1.5 rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-zinc-700/50 transition-colors"
+                      title="Copy to clipboard"
+                    >
+                      {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                    </button>
                     <div className="text-zinc-500 mb-2"># One call — identity + registration</div>
                     <div className="text-emerald-400">curl -X POST \</div>
                     <div className="text-zinc-300 pl-4">{API_URL}/identity/mint \</div>

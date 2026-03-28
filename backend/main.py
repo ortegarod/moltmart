@@ -214,6 +214,7 @@ RATE_LIMIT_WRITE = os.getenv("RATE_LIMIT_WRITE", "20/minute")  # Write endpoints
 
 # Network configuration
 USE_TESTNET = os.getenv("USE_TESTNET", "false").lower() == "true"
+DEV_BYPASS_X402 = os.getenv("DEV_BYPASS_X402", "false").lower() == "true"
 CHAIN_ID = 84532 if USE_TESTNET else 8453  # Base Sepolia vs Base Mainnet
 NETWORK = f"eip155:{CHAIN_ID}"
 
@@ -263,8 +264,11 @@ x402_routes: dict[str, RouteConfig] = {
     ),
 }
 
-# Add x402 payment middleware
-app.add_middleware(PaymentMiddlewareASGI, routes=x402_routes, server=x402_server)
+# Add x402 payment middleware (skipped in dev with DEV_BYPASS_X402=true)
+if DEV_BYPASS_X402:
+    print("⚠️  DEV_BYPASS_X402=true — x402 payment middleware disabled")
+else:
+    app.add_middleware(PaymentMiddlewareASGI, routes=x402_routes, server=x402_server)
 
 
 # ============ DATABASE INITIALIZATION ============
@@ -610,7 +614,7 @@ async def require_agent(x_api_key: str = Header(...)) -> Agent:
     if not x_api_key:
         raise HTTPException(
             status_code=401,
-            detail="X-API-Key header required. Register at POST /agents/register (free). To list services, you'll also need an ERC-8004 identity (POST /identity/mint, $0.05).",
+            detail="X-API-Key header required. Register at POST /agents/register (free). To list services, you'll also need an ERC-8004 identity (POST /identity/mint, free — we cover gas).",
         )
     db_agent = await get_agent_by_api_key(x_api_key)
     if not db_agent:
@@ -1351,7 +1355,7 @@ async def register_agent(agent_data: AgentRegister, request: Request):
     **Method A: Off-chain signature** (if your wallet supports signing)
     1. Sign the challenge message (GET /agents/challenge)
     2. Submit registration with `signature`
-    3. (Optional) Get an ERC-8004 identity for verified badge (POST /identity/mint - $0.05)
+    3. (Optional) Get an ERC-8004 identity for verified badge (POST /identity/mint (FREE — we cover gas))
 
     **Method B: On-chain verification** (for custodial wallets like Bankr)
     1. Get on-chain challenge (GET /agents/challenge/onchain?wallet_address=0x...)
@@ -1918,10 +1922,11 @@ async def _do_create_service(service_data: ServiceCreate, agent: Agent) -> Servi
     """Internal function to create service (used by both x402 and on-chain payment endpoints)"""
 
     # Check ERC-8004 identity from DB (required to list services — no chain re-query needed)
-    if not (agent.erc8004 and agent.erc8004.has_8004):
+    # DEV_BYPASS_X402 also skips identity check so local dev can test without on-chain setup
+    if not DEV_BYPASS_X402 and not (agent.erc8004 and agent.erc8004.has_8004):
         raise HTTPException(
             status_code=403,
-            detail="ERC-8004 identity required to list services. Get one at POST /identity/mint ($0.05 if you don't have one) or mint directly on the contract at 0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
+            detail="ERC-8004 identity required to list services. Get one at POST /identity/mint (FREE — we cover gas) or mint directly on the contract at 0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
         )
 
     # Check rate limits
@@ -2000,7 +2005,7 @@ async def create_service_onchain(
 
     Flow:
     1. GET /payment/challenge?action=list&wallet_address=0x...
-    2. Send $0.05 USDC to the returned recipient address on Base
+    2. Send $0.01 USDC to the returned recipient address on Base
     3. POST /services/onchain with service details and tx_hash
 
     Requires X-API-Key header.
@@ -2041,7 +2046,7 @@ async def create_service_endpoint(service: ServiceCreate, agent: Agent = Depends
 
     Requires X-API-Key header with your agent's API key.
 
-    **Don't have ERC-8004?** Get one at POST /identity/mint ($0.05)
+    **Don't have ERC-8004?** Get one at POST /identity/mint (FREE via x402, $0.05 via on-chain for custodial wallets)
     or mint directly on contract 0x8004A169FB4a3325136EB29fA0ceB6D2e539a432
 
     Returns a SECRET TOKEN - save it! You need to add this to your endpoint
