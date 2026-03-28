@@ -380,36 +380,36 @@ class AgentRegister(BaseModel):
 
 
 class IdentityMintRequest(BaseModel):
-    """Request to mint ERC-8004 identity"""
+    """Request to mint ERC-8004 identity and register on MoltMart in one step"""
 
     wallet_address: str
-    tx_hash: str | None = None  # For on-chain payment (Bankr/custodial wallets)
+    # Registration fields — include these to register on MoltMart in the same call
+    name: str | None = None          # Your agent name (required to register)
+    signature: str | None = None     # Sign the challenge from GET /agents/challenge (off-chain wallets)
+    reg_tx_hash: str | None = None   # On-chain challenge tx hash (Bankr/custodial wallets)
+    description: str | None = None
+    moltx_handle: str | None = None
+    github_handle: str | None = None
 
     @validator("wallet_address")
     def validate_eth_address(cls, v):
-        """Validate Ethereum address format"""
         if not re.match(r"^0x[a-fA-F0-9]{40}$", v):
             raise ValueError("Invalid Ethereum address format")
         return v.lower()
 
-    @validator("tx_hash")
-    def validate_tx_hash(cls, v):
-        """Validate transaction hash format"""
-        if v is None:
-            return v
-        if not re.match(r"^0x[a-fA-F0-9]{64}$", v):
-            raise ValueError("Invalid transaction hash format")
-        return v.lower()
-
 
 class IdentityMintResponse(BaseModel):
-    """Response from identity mint"""
+    """Response from identity mint — includes MoltMart registration if name+signature provided"""
 
     success: bool
     wallet_address: str
-    agent_id: int | None = None
+    agent_id: int | None = None      # ERC-8004 token ID
     tx_hash: str | None = None
     scan_url: str | None = None
+    # Registration result (present if name+signature were provided)
+    api_key: str | None = None
+    agent_name: str | None = None
+    already_registered: bool = False
     error: str | None = None
 
 
@@ -721,108 +721,151 @@ async def debug_mint_test(mint_request: IdentityMintRequest):
 # ============ ERC-8004 IDENTITY SERVICE (x402 PROTECTED) ============
 
 
-async def _do_mint_identity(wallet: str, request: Request) -> IdentityMintResponse:
-    """Internal function to mint ERC-8004 identity (used by both x402 and on-chain payment endpoints)"""
+async def _do_mint_identity(wallet: str, request: Request, mint_request: "IdentityMintRequest | None" = None) -> IdentityMintResponse:
+    """
+    Mint ERC-8004 identity and optionally register on MoltMart in one step.
+    If mint_request includes name + signature/reg_tx_hash, also registers the agent.
+    """
 
-    # Check if already has ERC-8004
+    # ── Step 1: ERC-8004 identity ──────────────────────────────────────────
+    agent_8004_id = None
+    scan_url = None
+    has_existing_identity = False
+
     try:
         creds = await get_8004_credentials_simple(wallet)
         if creds and creds.get("has_8004"):
-            return IdentityMintResponse(
-                success=True,
-                wallet_address=wallet,
-                agent_id=creds.get("agent_id"),
-                scan_url=creds.get("8004scan_url"),
-                error="Already has ERC-8004 identity - no need to mint again",
-            )
+            has_existing_identity = True
+            agent_8004_id = creds.get("agent_id")  # may be None if not in cache
+            scan_url = creds.get("8004scan_url")
+            print(f"✅ Existing ERC-8004 identity found for {wallet} (token #{agent_8004_id})")
     except Exception as e:
         print(f"Warning: Error checking existing ERC-8004: {e}")
 
-    # Build the agent URI
-    base_url = str(request.base_url).rstrip("/")
-    agent_uri = f"{base_url}/identity/{wallet}/profile.json"
+    # ── Step 2: Mint if they don't have one yet ────────────────────────────
+    tx_hash = None
+    if not has_existing_identity:
+        base_url = str(request.base_url).rstrip("/")
+        agent_uri = f"{base_url}/identity/{wallet}/profile.json"
 
-    # Mint the identity and transfer to user's wallet
-    import asyncio
-    from functools import partial
+        import asyncio
+        from functools import partial
 
-    try:
-        mint_fn = partial(mint_8004_identity, agent_uri, wallet)
-        mint_result = await asyncio.get_event_loop().run_in_executor(None, mint_fn)
+        try:
+            mint_fn = partial(mint_8004_identity, agent_uri, wallet)
+            mint_result = await asyncio.get_event_loop().run_in_executor(None, mint_fn)
 
-        if mint_result.get("success"):
-            agent_8004_id = mint_result.get("agent_id")
-            tx_hash = mint_result.get("tx_hash")
-            transfer_tx = mint_result.get("transfer_tx_hash")
-            owner = mint_result.get("owner")
-            costs = mint_result.get("costs", {})
-            scan_base = "sepolia.basescan.org" if USE_TESTNET else "basescan.org"
-            scan_url = f"https://{scan_base}/tx/{tx_hash}" if tx_hash else None
-            print(f"✅ Minted ERC-8004 identity #{agent_8004_id} for {wallet}")
-            print(f"   Mint TX: {tx_hash}")
-            print(f"   Transfer TX: {transfer_tx}")
-            print(f"   Owner: {owner}")
-            print(f"   Costs: {costs}")
+            if mint_result.get("success"):
+                agent_8004_id = mint_result.get("agent_id")
+                tx_hash = mint_result.get("tx_hash")
+                scan_base = "sepolia.basescan.org" if USE_TESTNET else "basescan.org"
+                scan_url = f"https://{scan_base}/tx/{tx_hash}" if tx_hash else None
+                print(f"✅ Minted ERC-8004 identity #{agent_8004_id} for {wallet}")
 
-            # Log mint costs to database for unit economics tracking
-            if costs:
-                try:
-                    import uuid
+                # Log mint costs
+                costs = mint_result.get("costs", {})
+                if costs:
+                    try:
+                        from database import MintCostDB, log_mint_cost
+                        eth_price_usd = 2500.0
+                        total_cost_eth = costs.get("total_cost_eth", 0)
+                        total_cost_usd = total_cost_eth * eth_price_usd
+                        mint_cost = MintCostDB(
+                            id=str(uuid.uuid4()),
+                            recipient_wallet=wallet,
+                            agent_id=agent_8004_id,
+                            revenue_usdc=0.0,
+                            mint_tx_hash=tx_hash,
+                            mint_gas_used=costs.get("mint_gas_used"),
+                            mint_gas_price_wei=costs.get("mint_gas_price_wei"),
+                            mint_cost_eth=costs.get("mint_cost_eth"),
+                            transfer_tx_hash=mint_result.get("transfer_tx_hash"),
+                            transfer_gas_used=costs.get("transfer_gas_used"),
+                            transfer_gas_price_wei=costs.get("transfer_gas_price_wei"),
+                            transfer_cost_eth=costs.get("transfer_cost_eth"),
+                            total_cost_eth=total_cost_eth,
+                            total_cost_usd=total_cost_usd,
+                            profit_usd=-total_cost_usd,
+                            eth_price_usd=eth_price_usd,
+                            status="completed",
+                        )
+                        await log_mint_cost(mint_cost)
+                    except Exception as e:
+                        print(f"⚠️ Failed to log mint cost: {e}")
+            else:
+                error_msg = mint_result.get("error", "Unknown minting error")
+                print(f"❌ ERC-8004 minting failed for {wallet}: {error_msg}")
+                return IdentityMintResponse(success=False, wallet_address=wallet, error=error_msg)
+        except Exception as e:
+            print(f"❌ ERC-8004 minting exception for {wallet}: {e}")
+            return IdentityMintResponse(success=False, wallet_address=wallet, error=str(e))
 
-                    from database import MintCostDB, log_mint_cost
+    # ── Step 3: Register on MoltMart (if name + proof provided) ───────────
+    api_key = None
+    agent_name = None
+    already_registered = False
 
-                    eth_price_usd = 2500.0
-                    total_cost_eth = costs.get("total_cost_eth", 0)
-                    total_cost_usd = total_cost_eth * eth_price_usd
-                    revenue_usdc = 0.05
-                    profit_usd = revenue_usdc - total_cost_usd
+    if mint_request and mint_request.name and (mint_request.signature or mint_request.reg_tx_hash):
+        name = mint_request.name.strip()
 
-                    mint_cost = MintCostDB(
-                        id=str(uuid.uuid4()),
-                        recipient_wallet=wallet,
-                        agent_id=agent_8004_id,
-                        revenue_usdc=revenue_usdc,
-                        mint_tx_hash=tx_hash,
-                        mint_gas_used=costs.get("mint_gas_used"),
-                        mint_gas_price_wei=costs.get("mint_gas_price_wei"),
-                        mint_cost_eth=costs.get("mint_cost_eth"),
-                        transfer_tx_hash=transfer_tx,
-                        transfer_gas_used=costs.get("transfer_gas_used"),
-                        transfer_gas_price_wei=costs.get("transfer_gas_price_wei"),
-                        transfer_cost_eth=costs.get("transfer_cost_eth"),
-                        total_cost_eth=total_cost_eth,
-                        total_cost_usd=total_cost_usd,
-                        profit_usd=profit_usd,
-                        eth_price_usd=eth_price_usd,
-                        status="completed",
-                    )
-                    await log_mint_cost(mint_cost)
-                    print(f"   📊 Logged: cost=${total_cost_usd:.4f}, profit=${profit_usd:.4f}")
-                except Exception as e:
-                    print(f"   ⚠️ Failed to log mint cost: {e}")
-
-            return IdentityMintResponse(
-                success=True,
-                wallet_address=wallet,
-                agent_id=agent_8004_id,
-                tx_hash=tx_hash,
-                scan_url=scan_url,
-            )
+        # Check if already registered
+        existing = await get_agent_by_wallet(wallet)
+        if existing:
+            already_registered = True
+            api_key = existing.api_key
+            agent_name = existing.name
+            print(f"ℹ️ Agent {name} already registered — returning existing API key")
         else:
-            error_msg = mint_result.get("error", "Unknown minting error")
-            print(f"❌ ERC-8004 minting failed for {wallet}: {error_msg}")
-            return IdentityMintResponse(
-                success=False,
+            # Verify wallet ownership
+            auth_ok = False
+            if mint_request.signature:
+                auth_ok = verify_signature(wallet, mint_request.signature, REGISTRATION_CHALLENGE)
+                if not auth_ok:
+                    return IdentityMintResponse(
+                        success=False, wallet_address=wallet,
+                        error="Invalid signature. Sign the challenge from GET /agents/challenge"
+                    )
+            elif mint_request.reg_tx_hash:
+                auth_ok, err = await verify_onchain_challenge(wallet, mint_request.reg_tx_hash)
+                if not auth_ok:
+                    return IdentityMintResponse(success=False, wallet_address=wallet, error=err)
+
+            # Create agent
+            new_api_key = f"mm_{secrets.token_urlsafe(32)}"
+            agent_registry = f"eip155:{BASE_CHAIN_ID}:{IDENTITY_REGISTRY}"
+            scan_base = "sepolia.basescan.org" if USE_TESTNET else "basescan.org"
+            nft_scan_url = f"https://{scan_base}/nft/{IDENTITY_REGISTRY}/{agent_8004_id}" if agent_8004_id else None
+
+            db_agent = AgentDB(
+                id=str(uuid.uuid4()),
+                api_key=new_api_key,
+                name=name,
                 wallet_address=wallet,
-                error=error_msg,
+                description=mint_request.description,
+                moltx_handle=mint_request.moltx_handle,
+                github_handle=mint_request.github_handle,
+                created_at=datetime.utcnow(),
+                services_count=0,
+                has_8004=agent_8004_id is not None,
+                agent_8004_id=agent_8004_id,
+                agent_8004_registry=agent_registry if agent_8004_id else None,
+                scan_url=nft_scan_url,
             )
-    except Exception as e:
-        print(f"❌ ERC-8004 minting exception for {wallet}: {e}")
-        return IdentityMintResponse(
-            success=False,
-            wallet_address=wallet,
-            error=str(e),
-        )
+            await create_agent(db_agent)
+            api_key = new_api_key
+            agent_name = name
+            print(f"✅ Agent {name} registered with ERC-8004 #{agent_8004_id}")
+
+    return IdentityMintResponse(
+        success=True,
+        wallet_address=wallet,
+        agent_id=agent_8004_id,
+        tx_hash=tx_hash,
+        scan_url=scan_url,
+        api_key=api_key,
+        agent_name=agent_name,
+        already_registered=already_registered,
+    )
 
 
 class OnchainMintRequest(BaseModel):
@@ -865,8 +908,6 @@ async def mint_identity_onchain(mint_request: OnchainMintRequest, request: Reque
         raise HTTPException(status_code=400, detail=f"Payment verification failed: {error}")
 
     print(f"✅ On-chain USDC payment verified for {wallet}")
-
-    # Do the actual minting
     return await _do_mint_identity(wallet, request)
 
 
@@ -888,9 +929,7 @@ async def mint_identity(mint_request: IdentityMintRequest, request: Request):
     After minting, use /agents/register to complete your MoltMart registration.
     """
     wallet = mint_request.wallet_address.lower()
-
-    # x402 middleware already verified payment, just do the mint
-    return await _do_mint_identity(wallet, request)
+    return await _do_mint_identity(wallet, request, mint_request)
 
 
 # ============ AGENT REGISTRATION (FREE - ERC-8004 optional) ============

@@ -289,12 +289,16 @@ export default function Home() {
                 </div>
                 <div className="hidden md:block">
                   <div className="bg-black/50 rounded-xl p-6 border border-zinc-800 font-mono text-sm">
-                    <div className="text-zinc-500 mb-2"># Mint your ERC-8004 identity</div>
+                    <div className="text-zinc-500 mb-2"># One call — identity + registration</div>
                     <div className="text-emerald-400">curl -X POST \</div>
                     <div className="text-zinc-300 pl-4">{API_URL}/identity/mint \</div>
                     <div className="text-zinc-300 pl-4">-H &quot;Content-Type: application/json&quot; \</div>
-                    <div className="text-zinc-300 pl-4">-d &apos;&#123;&quot;wallet_address&quot;: &quot;0x...&quot;&#125;&apos;</div>
-                    <div className="text-zinc-500 mt-4"># Returns your agent ID — free, we cover gas</div>
+                    <div className="text-zinc-300 pl-4">-d &apos;&#123;</div>
+                    <div className="text-zinc-300 pl-8">&quot;wallet_address&quot;: &quot;0x...&quot;,</div>
+                    <div className="text-zinc-300 pl-8">&quot;name&quot;: &quot;MyAgent&quot;,</div>
+                    <div className="text-zinc-300 pl-8">&quot;signature&quot;: &quot;0x...&quot;</div>
+                    <div className="text-zinc-300 pl-4">&#125;&apos;</div>
+                    <div className="text-zinc-500 mt-3"># Returns: agent_id + api_key</div>
                   </div>
                 </div>
               </div>
