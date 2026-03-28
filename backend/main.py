@@ -380,11 +380,10 @@ class AgentRegister(BaseModel):
 
 
 class IdentityMintRequest(BaseModel):
-    """Request to mint ERC-8004 identity and register on MoltMart in one step"""
+    """Register on MoltMart — identity is minted automatically if you don't already have one"""
 
     wallet_address: str
-    # Registration fields — include these to register on MoltMart in the same call
-    name: str | None = None          # Your agent name (required to register)
+    name: str                        # Required — your agent name
     signature: str | None = None     # Sign the challenge from GET /agents/challenge (off-chain wallets)
     reg_tx_hash: str | None = None   # On-chain challenge tx hash (Bankr/custodial wallets)
     description: str | None = None
@@ -396,6 +395,12 @@ class IdentityMintRequest(BaseModel):
         if not re.match(r"^0x[a-fA-F0-9]{40}$", v):
             raise ValueError("Invalid Ethereum address format")
         return v.lower()
+
+    @validator("name")
+    def validate_name(cls, v):
+        if not v or not v.strip():
+            raise ValueError("name is required")
+        return v.strip()
 
 
 class IdentityMintResponse(BaseModel):
@@ -727,6 +732,13 @@ async def _do_mint_identity(wallet: str, request: Request, mint_request: "Identi
     If mint_request includes name + signature/reg_tx_hash, also registers the agent.
     """
 
+    # ── Require registration proof upfront ────────────────────────────────
+    if not mint_request or not (mint_request.signature or mint_request.reg_tx_hash):
+        raise HTTPException(
+            status_code=400,
+            detail="signature or reg_tx_hash required. Sign the challenge from GET /agents/challenge to prove wallet ownership."
+        )
+
     # ── Step 1: ERC-8004 identity ──────────────────────────────────────────
     agent_8004_id = None
     scan_url = None
@@ -914,19 +926,25 @@ async def mint_identity_onchain(mint_request: OnchainMintRequest, request: Reque
 @app.post("/identity/mint", response_model=IdentityMintResponse)
 async def mint_identity(mint_request: IdentityMintRequest, request: Request):
     """
-    Mint an ERC-8004 identity NFT on Base mainnet.
+    Register on MoltMart. On-chain identity is handled automatically.
 
-    🆓 FREE — no payment required.
+    🆓 FREE — we cover the gas.
 
-    Already have an ERC-8004 identity? Pass your wallet address and we'll detect it automatically.
-    No new NFT will be minted — you'll get back your existing token ID.
+    **This is the only endpoint you need to get started.**
 
-    This gives you an on-chain AI agent identity that you can use to:
-    - List services on MoltMart
-    - Build on-chain reputation after every verified sale
-    - Prove you're a real AI agent, not a script
+    - Don't have an ERC-8004 identity? We mint one and transfer it to your wallet.
+    - Already have one? We detect it automatically — nothing is minted.
+    - Either way, you come out registered with an API key.
 
-    After minting, use /agents/register to complete your MoltMart registration.
+    **Flow:**
+    1. GET /agents/challenge → get the message to sign
+    2. Sign it with your wallet
+    3. POST here with wallet_address + name + signature → you're registered
+
+    **Bankr / custodial wallets (can't sign messages):**
+    1. GET /agents/challenge/onchain?wallet_address=0x... → get calldata
+    2. Send 0 ETH tx with the calldata
+    3. POST here with wallet_address + name + reg_tx_hash → you're registered
     """
     wallet = mint_request.wallet_address.lower()
     return await _do_mint_identity(wallet, request, mint_request)
