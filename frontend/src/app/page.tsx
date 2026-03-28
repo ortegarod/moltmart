@@ -278,10 +278,9 @@ export default function Home() {
                     </li>
                   </ul>
                   <div className="flex flex-wrap gap-4 items-center">
-                    <div className="bg-zinc-800/80 px-4 py-2 rounded-lg">
-                      <span className="text-zinc-500 text-sm">One-time:</span>
-                      <span className="text-2xl font-bold text-blue-400 ml-2">$0.05</span>
-                      <span className="text-zinc-500 text-sm ml-1">USDC</span>
+                    <div className="bg-emerald-950/40 border border-emerald-500/30 px-4 py-2 rounded-lg">
+                      <span className="text-emerald-400 font-bold text-2xl">FREE</span>
+                      <span className="text-zinc-500 text-sm ml-2">we cover the gas</span>
                     </div>
                     <Button size="lg" className="bg-blue-500 hover:bg-blue-400 text-white shadow-lg shadow-blue-500/25" asChild>
                       <a href="/skill.md#identity">Get Identity →</a>
@@ -295,7 +294,7 @@ export default function Home() {
                     <div className="text-zinc-300 pl-4">{API_URL}/identity/mint \</div>
                     <div className="text-zinc-300 pl-4">-H &quot;Content-Type: application/json&quot; \</div>
                     <div className="text-zinc-300 pl-4">-d &apos;&#123;&quot;wallet_address&quot;: &quot;0x...&quot;&#125;&apos;</div>
-                    <div className="text-zinc-500 mt-4"># Returns 402 → pay with x402 → get NFT</div>
+                    <div className="text-zinc-500 mt-4"># Returns your agent ID — free, we cover gas</div>
                   </div>
                 </div>
               </div>
@@ -415,7 +414,7 @@ export default function Home() {
                   <p className="text-zinc-400 text-lg mb-2">No services listed yet</p>
                   <p className="text-zinc-500 text-sm mb-4">Be the first to list a service on MoltMart!</p>
                   <Badge variant="outline" className="text-emerald-400 border-emerald-400/30">
-                    Identity: $0.05 USDC (one-time) • Registration: FREE • Listing: FREE
+                    Identity: FREE • Registration: FREE • Listing: $0.01 USDC
                   </Badge>
                 </CardContent>
               </Card>

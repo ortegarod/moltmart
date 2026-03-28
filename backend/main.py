@@ -226,8 +226,8 @@ MOLTMART_WALLET = os.getenv("MOLTMART_WALLET", "0x8b5625F01b286540AC9D8043E2d765
 FACILITATOR_URL = os.getenv("FACILITATOR_URL", "https://facilitator.moltmart.app")
 
 # Pricing
-IDENTITY_MINT_PRICE = "$0.05"  # Pay to mint ERC-8004 identity
-LISTING_PRICE = "FREE"  # Service listing is free - reputation handles spam
+IDENTITY_MINT_PRICE = "FREE"   # Identity minting is free — costs us ~$0.002 in gas
+LISTING_PRICE = "$0.01"        # $0.01 USDC to list a service (spam prevention)
 
 # Registration challenge message (agents sign this to prove wallet ownership)
 REGISTRATION_CHALLENGE = "MoltMart Registration: I own this wallet and have an ERC-8004 identity"
@@ -247,21 +247,20 @@ x402_server.register(NETWORK, ExactEvmServerScheme())
 print(f"📡 x402 registered for network: {NETWORK} ({'testnet' if USE_TESTNET else 'mainnet'})")
 
 # Define x402-protected routes
-# NOTE: Service listing is FREE - only identity minting requires payment
+# Identity minting is FREE. Service listing costs $0.01 (spam prevention).
 x402_routes: dict[str, RouteConfig] = {
-    "POST /identity/mint": RouteConfig(
+    "POST /services": RouteConfig(
         accepts=[
             PaymentOption(
                 scheme="exact",
                 pay_to=MOLTMART_WALLET,
-                price=IDENTITY_MINT_PRICE,
+                price=LISTING_PRICE,
                 network=NETWORK,
             ),
         ],
         mime_type="application/json",
-        description="Mint an ERC-8004 identity NFT ($0.05 USDC)",
+        description="List a service ($0.01 USDC)",
     ),
-    # Service listing removed from x402 - it's FREE now
 }
 
 # Add x402 payment middleware
@@ -629,7 +628,7 @@ async def root():
         "erc8004_required": True,
         "pricing": {
             "identity_mint": IDENTITY_MINT_PRICE,
-            "registration": "FREE (ERC-8004 optional, required to list services)",
+            "registration": "FREE",
             "listing": LISTING_PRICE,
         },
         "rate_limits": {
@@ -876,13 +875,14 @@ async def mint_identity(mint_request: IdentityMintRequest, request: Request):
     """
     Mint an ERC-8004 identity NFT on Base mainnet.
 
-    💰 Requires x402 payment: $0.05 USDC on Base
+    🆓 FREE — no payment required.
 
-    **Can't sign x402?** Use POST /identity/mint/onchain instead (for Bankr/custodial wallets).
+    Already have an ERC-8004 identity? Pass your wallet address and we'll detect it automatically.
+    No new NFT will be minted — you'll get back your existing token ID.
 
     This gives you an on-chain AI agent identity that you can use to:
-    - Register on MoltMart (required)
-    - Build on-chain reputation
+    - List services on MoltMart
+    - Build on-chain reputation after every verified sale
     - Prove you're a real AI agent, not a script
 
     After minting, use /agents/register to complete your MoltMart registration.
@@ -1063,8 +1063,7 @@ async def get_payment_challenge(action: str, wallet_address: str, service_id: st
     3. Call the action endpoint with tx_hash parameter
 
     **Actions:**
-    - `mint` - Mint ERC-8004 identity ($0.05 USDC) → recipient: MoltMart
-    - `list` - List a service ($0.05 USDC) → recipient: MoltMart
+    - `list` - List a service ($0.01 USDC) → recipient: MoltMart
     - `call` - Call a service (service price) → recipient: seller's wallet (requires service_id)
     """
     try:
@@ -1075,13 +1074,8 @@ async def get_payment_challenge(action: str, wallet_address: str, service_id: st
     wallet_lower = wallet_address.lower()
 
     # Handle different actions
-    if action == "mint":
-        amount = 0.05
-        description = "Mint ERC-8004 identity"
-        recipient = MOLTMART_WALLET
-        next_step = "POST /identity/mint/onchain with tx_hash=0x..."
-    elif action == "list":
-        amount = 0.05
+    if action == "list":
+        amount = 0.01
         description = "List a service"
         recipient = MOLTMART_WALLET
         next_step = "POST /services/onchain with tx_hash=0x..."
@@ -1956,7 +1950,7 @@ async def create_service_onchain(
     For wallets that CAN sign, use POST /services (x402) instead.
     """
     # Verify on-chain USDC payment
-    success, error = await verify_usdc_payment(agent.wallet_address, service.tx_hash, 0.05, "list")
+    success, error = await verify_usdc_payment(agent.wallet_address, service.tx_hash, 0.01, "list")
     if not success:
         raise HTTPException(status_code=400, detail=f"Payment verification failed: {error}")
 
