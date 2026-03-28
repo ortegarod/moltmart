@@ -354,7 +354,7 @@ def record_listing(api_key: str):
 
 
 class AgentRegister(BaseModel):
-    """Register a new agent - requires ERC-8004 proof"""
+    """Register a new agent - ERC-8004 optional (required to list services)"""
 
     name: str
     wallet_address: str
@@ -496,6 +496,8 @@ class ServiceResponse(BaseModel):
     output_schema: dict | None = None
     example_request: dict | None = None
     example_response: dict | None = None
+    # ERC-8004 provider credentials (enriched server-side)
+    erc8004: ERC8004Credentials | None = None
 
 
 class ServiceCreateResponse(ServiceResponse):
@@ -604,7 +606,7 @@ async def require_agent(x_api_key: str = Header(...)) -> Agent:
     if not x_api_key:
         raise HTTPException(
             status_code=401,
-            detail="X-API-Key header required. Get ERC-8004 identity first (POST /identity/mint), then register at POST /agents/register",
+            detail="X-API-Key header required. Register at POST /agents/register (free). To list services, you'll also need an ERC-8004 identity (POST /identity/mint, $0.05).",
         )
     db_agent = await get_agent_by_api_key(x_api_key)
     if not db_agent:
@@ -627,7 +629,7 @@ async def root():
         "erc8004_required": True,
         "pricing": {
             "identity_mint": IDENTITY_MINT_PRICE,
-            "registration": "FREE (requires ERC-8004)",
+            "registration": "FREE (ERC-8004 optional, required to list services)",
             "listing": LISTING_PRICE,
         },
         "rate_limits": {
@@ -891,7 +893,7 @@ async def mint_identity(mint_request: IdentityMintRequest, request: Request):
     return await _do_mint_identity(wallet, request)
 
 
-# ============ AGENT REGISTRATION (FREE - requires ERC-8004) ============
+# ============ AGENT REGISTRATION (FREE - ERC-8004 optional) ============
 
 
 def verify_signature(wallet_address: str, signature: str, message: str) -> bool:
@@ -2019,8 +2021,32 @@ async def list_services(
         filtered = [s for s in filtered if s.provider_wallet.lower() == provider_wallet.lower()]
     total = len(filtered)
 
+    # Enrich services with ERC-8004 provider credentials (one DB query, no per-service calls)
+    unique_wallets = {s.provider_wallet for s in db_services}
+    wallet_8004: dict[str, ERC8004Credentials | None] = {}
+    for wallet in unique_wallets:
+        db_agent = await get_agent_by_wallet(wallet)
+        if db_agent and db_agent.has_8004:
+            wallet_8004[wallet] = ERC8004Credentials(
+                has_8004=True,
+                agent_id=db_agent.agent_8004_id,
+                agent_count=1,
+                agent_registry=db_agent.agent_8004_registry,
+                name=db_agent.name,
+                description=db_agent.description,
+                scan_url=db_agent.scan_url,
+            )
+        else:
+            wallet_8004[wallet] = None
+
+    responses = []
+    for s in db_services:
+        resp = db_service_to_response(s)
+        resp.erc8004 = wallet_8004.get(s.provider_wallet)
+        responses.append(resp)
+
     return ServiceList(
-        services=[db_service_to_response(s) for s in db_services],
+        services=responses,
         total=total,
         limit=limit,
         offset=offset,
